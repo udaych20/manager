@@ -189,6 +189,7 @@ namespace systems_manager.src.util
 
         private const double BytesPerGigabyte = 1_000_000_000d;
         private const double BytesPerGibibyte = 1024d * 1024d * 1024d;
+        private const double BytesPerMegabyte = 1_000_000d;
 
         private static bool TryParseQuantity(string quantity, out double value, out string unit)
         {
@@ -278,11 +279,11 @@ namespace systems_manager.src.util
         public static string ConvertMemoryUsage(string memoryUsage, ILogger<K3sMetricsUtil> _k3sMetricsUtilLogger)
         {
             double bytes = ConvertMemoryQuantityToBytes(memoryUsage);
-            double memoryInGiB = bytes / BytesPerGibibyte;
+            double memoryInMegabytes = bytes / BytesPerMegabyte;
 
-            _k3sMetricsUtilLogger?.LogInformation("Node MemoryUsage - {MemoryUsage} converted into {MemoryInGiB} GiB", memoryUsage, memoryInGiB);
+            _k3sMetricsUtilLogger?.LogInformation("Node MemoryUsage - {MemoryUsage} converted into {MemoryInMb} MB", memoryUsage, memoryInMegabytes);
 
-            return memoryInGiB.ToString("F2", CultureInfo.InvariantCulture);
+            return memoryInMegabytes.ToString("F2", CultureInfo.InvariantCulture);
         }
 
 
@@ -293,8 +294,8 @@ namespace systems_manager.src.util
                 return 0f;
             }
 
-            double memoryInGiB = ConvertMemoryQuantityToBytes(memoryUsage) / BytesPerGibibyte;
-            return (float)(memoryInGiB / totalMemory * 100d);
+            double memoryInMegabytes = ConvertMemoryQuantityToBytes(memoryUsage) / BytesPerMegabyte;
+            return (float)(memoryInMegabytes / totalMemory * 100d);
         }
 
         public static float ConvertMemoryUsageKibIntoGB(string memoryUsage, ILogger<K3sMetricsUtil> _k3sMetricsUtilLogger)
