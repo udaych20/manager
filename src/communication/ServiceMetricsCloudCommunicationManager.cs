@@ -1,0 +1,93 @@
+using Authlete.Dto;
+using Microsoft.VisualStudio.Services.Commerce;
+using MQTTnet;
+using MQTTnet.Client;
+using systems_manager.src.service;
+
+namespace systems_manager.src.communication
+{
+    public class ServiceMetricsCloudCommunicationManager
+    {
+        private string brokerAddress;
+        private string brokerPort;
+        private ConfigPropertiesReader _configPropertiesReader;
+        private string localDBPath;
+        private string clientIdDynamic;
+        private IMqttClient mqttClient;
+        private string keepAliveTime;
+        private readonly DatabaseService _databaseService;
+        private MqttFactory mqttFactory;
+        private readonly ILogger<ServiceMetricsCloudCommunicationManager> _logger;
+        private readonly SemaphoreSlim connectLock = new SemaphoreSlim(1, 1);
+
+        public ServiceMetricsCloudCommunicationManager(ConfigPropertiesReader _configPropertiesReader, ILoggerFactory _loggerFactory, DatabaseService _databaseService)
+        {
+            _logger = _loggerFactory.CreateLogger<ServiceMetricsCloudCommunicationManager>();
+            this._configPropertiesReader = _configPropertiesReader;
+            // cloud_configurations/mqtt_broker_address -> CLOUD_CARE_HOST
+            brokerAddress = _configPropertiesReader.GetPropertyValue("CLOUD_CARE_HOST");
+            // cloud_configurations/mqtt_broker_port -> MQTT_PORT
+            brokerPort = _configPropertiesReader.GetPropertyValue("MQTT_PORT");
+            this.mqttFactory = new MqttFactory();
+            mqttClient = mqttFactory.CreateMqttClient();
+            // application/mqtt_keep_alive_time -> SM_APP_MQTT_KEEP_ALIVE_TIME
+            this.keepAliveTime = _configPropertiesReader.GetPropertyValue("SM_APP_MQTT_KEEP_ALIVE_TIME");
+            this._databaseService = _databaseService;
+            string deviceId = _configPropertiesReader.GetPropertyValue("DEVICE_ID");
+            string clientId = "SM_SER_MET_PUB_CLIENT_" + deviceId;
+
+            string clientIdString = $"{clientId}-{(long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds}";
+            EnsureConnectedAsync(clientIdString).GetAwaiter().GetResult();
+        }
+
+
+        public async Task EnsureConnectedAsync(string clientId)
+        {
+            await connectLock.WaitAsync();
+
+            try
+            {
+                var options = new MqttClientOptionsBuilder()
+                    .WithClientId(clientId)
+                    .WithTcpServer(brokerAddress, int.Parse(brokerPort))
+                    .WithCleanSession(true)
+                    .WithKeepAlivePeriod(TimeSpan.FromSeconds(int.Parse(keepAliveTime))) // 30 secs
+                .Build();
+                _logger.LogDebug("ServiceMetricsCloudCommunicationManager details - clientIdStr: {clientIdStrnig}", clientId);
+                await mqttClient.ConnectAsync(options);
+            }
+            catch (Exception e)
+            {
+                _logger.LogError(e, "ServiceMetricsCloudCommunicationManager details , BrokerAddress: {BrokerAddress}, BrokerPort: {BrokerPort}, ClientId: {ClientIdDynamic}", brokerAddress, brokerPort, clientId);
+                throw;
+            }
+            finally
+            {
+                connectLock.Release();
+            }
+        }
+
+        public async void PublishMessage(string topic, string clientId, string messageObj)
+        {
+            try
+            {
+
+                _logger.LogInformation("service metrics : {messageObj}", messageObj);
+                _logger.LogInformation("ServiceMetricsCloudCommunicationManager details - Topic: {Topic}, BrokerAddress: {BrokerAddress}, BrokerPort: {BrokerPort}, ClientId: {ClientIdDynamic}", topic, brokerAddress, brokerPort, clientId);
+                var message = new MqttApplicationMessageBuilder()
+                    .WithTopic(topic)
+                    .WithPayload(messageObj)
+                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
+                    .Build();
+
+                await mqttClient.PublishAsync(message);
+                _logger.LogInformation("ServiceMetricsCloudCommunicationManager Message Published - {topic}", topic);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Exception While Processing ServiceMetricsCloudCommunicationManager Publish Message: ");
+                throw;
+            }
+        }
+    }
+}

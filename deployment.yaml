@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: systems-manager-deployment
+  labels:
+    app: systems-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: systems-manager
+  template:
+    metadata:
+      labels:
+        app: systems-manager
+        workloadType: FunctionalCritical	        
+    spec:
+      containers:
+        - image: localhost:5000/systems-manager:latest #ghcr.io/wee-vlsi/systems-manager:v1.1.53
+          imagePullPolicy: Always
+          name: systems-manager
+          ports:
+            - containerPort: 80
+              name: 80tcp
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 128Mi
+            requests:
+              cpu: 250m
+              memory: 64Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /app/db
+              name: db-volume
+            - mountPath: /src
+              name: config-volume
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+        - name: ghcr
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - configMap:
+            defaultMode: 420
+            name: systems-manager-config
+          name: config-volume
+        - name: db-volume
+          persistentVolumeClaim:
+            claimName: sqllite.db
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nodeType
+                operator: In
+                values:
+                - device
