@@ -1,4 +1,4 @@
-﻿using k8s;
+﻿using System.Globalization;
 using Newtonsoft.Json;
 using systems_manager.src.service;
 
@@ -10,26 +10,37 @@ namespace systems_manager.src.util
             long deviceId,
             PrometheusMetricsService prometheusMetricsService,
             DatabaseService _databaseService,
-            ILogger<K3sMetricsUtil> _k3sMetricsUtilLogger,
-            Kubernetes _kubernetesClient,string namespaceParameter)
+            ILogger<K3sMetricsUtil> _k3sMetricsUtilLogger)
         {
             var podMetricsList = JsonConvert.DeserializeObject<PodMetricsList>(json);
             
-            var outputItem = new ServiceMetricsData();
             var outputList = new List<ServiceMetricsData>();
             int totalRestartCount = 0;
+            var podCountLookup = BuildPodCountLookup(podMetricsList);
             if (podMetricsList?.Items != null)
             {
                 foreach (var item in podMetricsList.Items)
                 {
-                    outputItem = new ServiceMetricsData();
+                    if (item?.Containers == null)
+                    {
+                        continue;
+                    }
+
                     foreach (var container in item.Containers)
                     {
-                        if (container.Name.ToLower().Contains("fluent-bit"))
+                        var containerName = container?.Name;
+                        if (string.IsNullOrWhiteSpace(containerName))
                         {
                             continue;
                         }
-                        else if (container.Name.ToLower().Contains("systems-manager"))
+
+                        var lowerContainerName = containerName.ToLowerInvariant();
+                        if (lowerContainerName.Contains("fluent-bit"))
+                        {
+                            continue;
+                        }
+
+                        if (lowerContainerName.Contains("systems-manager"))
                         {
                             DeviceConnectivityStatus status = _databaseService.GetDeviceConnectivityStatusById(1);
                             if (status != null && status.RunningPodName != item.Metadata.Name)
@@ -39,30 +50,22 @@ namespace systems_manager.src.util
                             }
                             continue;
                         }
-                        //UpdateNewServiceIntoServiceTable(_databaseService, container);
-                        //string inputIOQuery = "rate(container_network_receive_bytes_total{pod=~" + item.Metadata.Name + "}[1m])";
-                        //string inputIOQuery = $"rate(container_network_receive_bytes_total{{pod=~\"{item.Metadata.Name}\"}}[5m])";
-                        //MetricResult inputIO = prometheusMetricsService.QueryMetricsAsync(inputIOQuery).GetAwaiter().GetResult();
+                        var outputItem = new ServiceMetricsData
+                        {
+                            deviceId = deviceId,
+                            timestamp = DateTime.UtcNow,
+                            serviceName = containerName,
+                            cpuUsage = ConvertCpuUsage(container.Usage.Cpu),
+                            memoryUsage = ConvertMemoryUsage(container.Usage.Memory, _k3sMetricsUtilLogger),
+                            podCount = GetPodCountForContainer(podCountLookup, item, container),
+                            restartCount = totalRestartCount,
+                            outputIO = 0,
+                            inputIO = 0,
+                            deleteSwitch = "N",
+                            nodeName = item.Metadata.labels.nodeType,
+                            nodeType = item.Metadata.labels.nodeType
+                        };
 
-                        //string outputIOQuery = "rate(container_network_transmit_bytes_total{pod=~" + item.Metadata.Name + "}[1m])";
-                        //string outputIOQuery = $"rate(container_network_transmit_bytes_total{{pod=~\"{item.Metadata.Name}\"}}[5m])";
-                        //MetricResult outputIO = prometheusMetricsService.QueryMetricsAsync(outputIOQuery).GetAwaiter().GetResult();
-                        //outputItem = new ServiceMetricsData();
-                        outputItem.deviceId = deviceId;
-                        //outputItem.timestamp = item.Timestamp;outputItem.timestamp = item.Timestamp;
-                        outputItem.timestamp = DateTime.UtcNow;
-                        outputItem.serviceName = container.Name;
-                        outputItem.cpuUsage = ConvertCpuUsage(container.Usage.Cpu);
-                        outputItem.memoryUsage = ConvertMemoryUsage(container.Usage.Memory, _k3sMetricsUtilLogger);
-                        outputItem.podCount = GetPodCountFromDeploymentSync(_kubernetesClient, namespaceParameter, container.Name.ToString()+"-deployment");
-                        outputItem.restartCount = totalRestartCount;
-                        outputItem.outputIO = 0;
-                        outputItem.inputIO = 0;
-                        outputItem.deleteSwitch = "N";
-                        //TODO: Naresh - update to node name
-                        outputItem.nodeName = item.Metadata.labels.nodeType;
-                        //outputItem.nodeName = item.Spec.NodeName;
-                        outputItem.nodeType = item.Metadata.labels.nodeType;
                         outputList.Add(outputItem);
                     }
 
@@ -71,35 +74,74 @@ namespace systems_manager.src.util
             return outputList;
         }
 
-        private static int GetPodCountFromDeploymentSync(k8s.Kubernetes _kubernetesClient, string namespaceName, string deploymentName)
+        private static Dictionary<string, int> BuildPodCountLookup(PodMetricsList podMetricsList)
         {
-            try
+            var lookup = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (podMetricsList?.Items == null)
             {
-                // Get the deployment synchronously.
-                var deploymentTask = _kubernetesClient.ReadNamespacedDeploymentAsync(deploymentName, namespaceName);
-                var deployment = deploymentTask.GetAwaiter().GetResult();
-                if (deployment == null)
+                return lookup;
+            }
+
+            foreach (var item in podMetricsList.Items)
+            {
+                if (item == null)
                 {
-                    Console.WriteLine("Deployment not found.");
-                    return 0;
+                    continue;
                 }
 
-                // Get the pod list synchronously.
-                var podsTask = _kubernetesClient.ListNamespacedPodAsync(namespaceName, labelSelector: ConvertLabelsToString(deployment.Spec.Selector.MatchLabels));
-                var pods = podsTask.GetAwaiter().GetResult();
-                return pods.Items.Count;
+                var serviceLabel = item.Metadata?.labels?.service;
+                if (!string.IsNullOrEmpty(serviceLabel))
+                {
+                    if (!lookup.TryAdd(serviceLabel, 1))
+                    {
+                        lookup[serviceLabel]++;
+                    }
+                    continue;
+                }
+
+                if (item.Containers == null)
+                {
+                    continue;
+                }
+
+                foreach (var container in item.Containers)
+                {
+                    var containerName = container?.Name;
+                    if (string.IsNullOrEmpty(containerName))
+                    {
+                        continue;
+                    }
+
+                    if (!lookup.TryAdd(containerName, 1))
+                    {
+                        lookup[containerName]++;
+                    }
+                }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error occurred: {ex.Message}");
-                return 0;
-            }
+
+            return lookup;
         }
 
-        // Helper method to convert label dictionary to a label selector string.
-        private static string ConvertLabelsToString(IDictionary<string, string> labels)
+        private static int GetPodCountForContainer(Dictionary<string, int> podCountLookup, Item podMetricsItem, Container container)
         {
-            return string.Join(",", labels.Select(kvp => $"{kvp.Key}={kvp.Value}"));
+            if (podCountLookup == null || podMetricsItem == null || container == null)
+            {
+                return 0;
+            }
+
+            var serviceLabel = podMetricsItem.Metadata?.labels?.service;
+            if (!string.IsNullOrEmpty(serviceLabel) && podCountLookup.TryGetValue(serviceLabel, out var serviceCount))
+            {
+                return serviceCount;
+            }
+
+            var containerName = container.Name;
+            if (!string.IsNullOrEmpty(containerName) && podCountLookup.TryGetValue(containerName, out var containerCount))
+            {
+                return containerCount;
+            }
+
+            return 0;
         }
 
         private static void UpdateNewServiceIntoServiceTable(DatabaseService _databaseService, Container container)
@@ -145,76 +187,128 @@ namespace systems_manager.src.util
             return rootObject;
         }
 
+        private const double BytesPerGigabyte = 1_000_000_000d;
+        private const double BytesPerGibibyte = 1024d * 1024d * 1024d;
+        private const double BytesPerMegabyte = 1_000_000d;
+
+        private static bool TryParseQuantity(string quantity, out double value, out string unit)
+        {
+            value = 0;
+            unit = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(quantity))
+            {
+                return false;
+            }
+
+            int index = 0;
+            while (index < quantity.Length && (char.IsDigit(quantity[index]) || quantity[index] == '.' || quantity[index] == '-'))
+            {
+                index++;
+            }
+
+            if (index == 0)
+            {
+                return false;
+            }
+
+            string numberPart = quantity.Substring(0, index);
+            unit = quantity.Substring(index);
+
+            return double.TryParse(numberPart, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+        }
+
+        private static double ConvertCpuQuantityToCores(string cpuUsage)
+        {
+            if (!TryParseQuantity(cpuUsage, out var value, out var unit))
+            {
+                return 0d;
+            }
+
+            string normalizedUnit = string.IsNullOrEmpty(unit) ? string.Empty : unit.Trim().ToLowerInvariant();
+
+            return normalizedUnit switch
+            {
+                "" => value,
+                "n" => value / 1_000_000_000d,
+                "u" => value / 1_000_000d,
+                "m" => value / 1_000d,
+                _ => value
+            };
+        }
+
+        private static double ConvertMemoryQuantityToBytes(string memoryUsage)
+        {
+            if (!TryParseQuantity(memoryUsage, out var value, out var unit))
+            {
+                return 0d;
+            }
+
+            string normalizedUnit = string.IsNullOrEmpty(unit) ? string.Empty : unit.Trim().ToLowerInvariant();
+
+            return normalizedUnit switch
+            {
+                "" => value,
+                "ki" => value * 1024d,
+                "mi" => value * Math.Pow(1024d, 2),
+                "gi" => value * Math.Pow(1024d, 3),
+                "ti" => value * Math.Pow(1024d, 4),
+                "pi" => value * Math.Pow(1024d, 5),
+                "ei" => value * Math.Pow(1024d, 6),
+                "k" => value * 1000d,
+                "m" => value * Math.Pow(1000d, 2),
+                "g" => value * Math.Pow(1000d, 3),
+                "t" => value * Math.Pow(1000d, 4),
+                "p" => value * Math.Pow(1000d, 5),
+                "e" => value * Math.Pow(1000d, 6),
+                _ => value
+            };
+        }
+
         public static string ConvertCpuUsage(string cpuUsage)
         {
-            // Assuming the input is always in nanocores (n)
-            if (cpuUsage.EndsWith("n"))
+            if (string.IsNullOrWhiteSpace(cpuUsage))
             {
-                long cpuNanocores = long.Parse(cpuUsage.TrimEnd('n'));
-                double cpuPercentage = (double)cpuNanocores / 1_000_000_000 * 100;
-                return $"{cpuPercentage:F2}";
+                return 0d.ToString("F2", CultureInfo.InvariantCulture);
             }
-            return "0";
+
+            double coresUsed = ConvertCpuQuantityToCores(cpuUsage);
+            return coresUsed.ToString("F2", CultureInfo.InvariantCulture);
         }
 
         public static string ConvertMemoryUsage(string memoryUsage, ILogger<K3sMetricsUtil> _k3sMetricsUtilLogger)
         {
-            long value = long.Parse(memoryUsage.Substring(0, memoryUsage.Length - 2));
-            string unit = memoryUsage.Substring(memoryUsage.Length - 2);
-            _k3sMetricsUtilLogger.LogInformation($"Node MemoryUsage - {memoryUsage} converted into {unit}");
+            double bytes = ConvertMemoryQuantityToBytes(memoryUsage);
+            double memoryInMegabytes = bytes / BytesPerMegabyte;
 
-            switch (unit)
-            {
-                case "Ki":
-                    string convertedVal = $"{(double) value / 1024:F2}";
-                    return convertedVal;
-                case "Mi":
-                    return $"{value:F2}";
-                case "Gi":
-                    return $"{value * 1024:F2}";
-                default:
-                    return "0";
-            }
+            _k3sMetricsUtilLogger?.LogInformation("Node MemoryUsage - {MemoryUsage} converted into {MemoryInMb} MB", memoryUsage, memoryInMegabytes);
+
+            return memoryInMegabytes.ToString("F2", CultureInfo.InvariantCulture);
         }
 
 
         public static float ConvertMemoryUsagePct(string memoryUsage, float totalMemory, ILogger<K3sMetricsUtil> _k3sMetricsUtilLogger)
         {
-            long value = long.Parse(memoryUsage.Substring(0, memoryUsage.Length - 2));
-            string unit = memoryUsage.Substring(memoryUsage.Length - 2);
-            string memoryUsageCvt = "0";
-            switch (unit)
+            if (totalMemory <= 0)
             {
-                case "Ki":
-                    string convertedVal = $"{(double) value / 1024:F2}";
-                    memoryUsageCvt = convertedVal;
-                    break;
-                case "Mi":
-                    memoryUsageCvt = $"{value:F2}";
-                    break;
-                case "Gi":
-                    memoryUsageCvt = $"{value * 1024:F2}";
-                    break;
-                default:
-                    memoryUsageCvt = "0";
-                    break;
+                return 0f;
             }
-            return float.Parse(memoryUsageCvt) / totalMemory * 100;
+
+            double memoryInMegabytes = ConvertMemoryQuantityToBytes(memoryUsage) / BytesPerMegabyte;
+            return (float)(memoryInMegabytes / totalMemory * 100d);
         }
 
         public static float ConvertMemoryUsageKibIntoGB(string memoryUsage, ILogger<K3sMetricsUtil> _k3sMetricsUtilLogger)
         {
-            long value = long.Parse(memoryUsage.Substring(0, memoryUsage.Length - 2));
-            string unit = memoryUsage.Substring(memoryUsage.Length - 2);
-
-            if (unit.Equals("Ki"))
+            double bytes = ConvertMemoryQuantityToBytes(memoryUsage);
+            if (bytes <= 0)
             {
-                string convertedVal = $"{(double)value * 1024:F2}";
-                float gigabytes = float.Parse(convertedVal) / 1_000_000_000;
-                _k3sMetricsUtilLogger.LogInformation($"Node MemoryUsage - {memoryUsage} converted into {gigabytes}");
-                return gigabytes;
+                return 0f;
             }
-            return 0;
+
+            double gigabytes = bytes / BytesPerGigabyte;
+            _k3sMetricsUtilLogger?.LogInformation("Node MemoryUsage - {MemoryUsage} converted into {MemoryInGb} GB", memoryUsage, gigabytes);
+            return (float)gigabytes;
         }
 
         public static float CalculateMemoryUsagePercentage(float usedMemoryGB, float totalMemoryGB)
@@ -224,20 +318,11 @@ namespace systems_manager.src.util
 
         public static string CalculateCpuUsageNodePercentage(string cpuUsage, int totalCores, ILogger<K3sMetricsUtil> _k3sMetricsUtilLogger)
         {
-            long cpuNanocores = 0;
-            if (cpuUsage.EndsWith("n"))
-            {
-                cpuNanocores = long.Parse(cpuUsage.TrimEnd('n'));
+            double coresUsed = ConvertCpuQuantityToCores(cpuUsage);
+            double percentageUsed = totalCores > 0 ? coresUsed / totalCores * 100d : 0d;
 
-            }
-            // Convert nanocores to cores
-            double coresUsed = cpuNanocores / 1_000_000_000.0;
-
-            // Calculate the percentage of total cores used
-            double percentageUsed = coresUsed / totalCores * 100;
-
-            string cpu = $"{percentageUsed:F2}";
-            _k3sMetricsUtilLogger.LogInformation("cpu usage {cpuUsage} reveived from node metrics and .converted into {cpu}", cpuUsage, cpu);
+            string cpu = percentageUsed.ToString("F2", CultureInfo.InvariantCulture);
+            _k3sMetricsUtilLogger?.LogInformation("cpu usage {CpuUsage} received from node metrics and converted into {CpuPercentage}", cpuUsage, cpu);
             return cpu;
         }
     }

@@ -91,7 +91,7 @@ namespace ServiceManager
             {
                 var result = _kubernetesClient.ListNamespacedCustomObject(group, version, namespaceParameter, nodesOrPods);
                 _logger.LogDebug($"result - {result}");
-                return K3sMetricsUtil.ReadMetrics(result.ToString(), this.deviceId, prometheusMetricsService, _databaseService, _k3sMetricsUtilLogger, _kubernetesClient, namespaceParameter);
+                return K3sMetricsUtil.ReadMetrics(result.ToString(), this.deviceId, prometheusMetricsService, _databaseService, _k3sMetricsUtilLogger);
             }
             catch (Exception ex)
             {
